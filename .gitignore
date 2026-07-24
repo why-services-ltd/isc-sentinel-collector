@@ -1,0 +1,34 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+
+# Azure Functions Core Tools build artefacts, created locally by `func publish`
+.python_packages/
+bin/
+obj/
+
+# Azure / Bicep build output
+*.json.bak
+main.json
+what-if-*.txt
+
+# Local settings that may contain secrets
+local.settings.json
+.env
+
+# Deployment parameter files carry real tenant values (ISC hostname, alert
+# addresses, resource names). infra/main.bicepparam is the committed example
+# with placeholders; every other parameter file stays local by default.
+infra/*.bicepparam
+!infra/main.bicepparam
+
+# Local editor / assistant configuration
+.claude/
+.vscode/
+.idea/
+
+# macOS
+.DS_Store

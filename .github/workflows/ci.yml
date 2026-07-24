@@ -1,0 +1,125 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # Federated (OIDC) sign-in to Azure. Deliberately no client secret in GitHub
+  # secrets: the point of this project is not to hold long-lived credentials.
+  id-token: write
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  validate:
+    name: Build, lint and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install test dependencies
+        run: python -m pip install --upgrade pip pytest
+
+      - name: Run unit tests
+        run: python -m pytest
+
+      - name: Install Bicep
+        run: az bicep install
+
+      - name: Build template
+        run: az bicep build --file infra/main.bicep --stdout > /dev/null
+
+      - name: Lint template
+        run: |
+          set -o pipefail
+          # az bicep lint exits 0 on warnings, so fail the job explicitly if the
+          # strict ruleset in bicepconfig.json reports anything at all.
+          output=$(find infra -name '*.bicep' -print0 \
+            | xargs -0 -I{} az bicep lint --file {} 2>&1 \
+            | grep -v 'Bicep Linter Configuration' || true)
+          if [ -n "$output" ]; then
+            echo "$output"
+            echo "::error::Bicep lint reported findings"
+            exit 1
+          fi
+          echo "Lint clean."
+
+      - name: Assert no secret reached the repository
+        run: |
+          # The ISC credential is seeded out-of-band and owned by the rotator.
+          # A @secure() parameter would place it in deployment history, which
+          # outlives the credential and is readable by anyone with Reader.
+          # Anchored to the start of a line so that prose and comments
+          # explaining why there is no @secure() parameter do not trip it.
+          if grep -rnE '^[[:space:]]*@secure\(\)' \
+               --include='*.bicep' --include='*.bicepparam' infra/ ; then
+            echo "::error::infra/ declares a @secure() parameter. The ISC credential must never be passed as a template parameter - see docs/threat-model.md."
+            exit 1
+          fi
+          if grep -rniE '(clientSecret|client_secret|password)\s*[:=]\s*['\''"][^'\''"$]{8,}' \
+               --include='*.bicep' --include='*.bicepparam' infra/ ; then
+            echo "::error::A literal secret appears in infra/."
+            exit 1
+          fi
+          echo "No secret material found in infra/."
+
+  what-if:
+    name: What-if against target
+    needs: validate
+    # Only on the upstream repo's main branch: forks have no Azure credentials
+    # configured, and this job would fail confusingly for every contributor.
+    # Configure repository variables AZURE_CLIENT_ID / AZURE_TENANT_ID /
+    # AZURE_SUBSCRIPTION_ID / AZURE_RESOURCE_GROUP, an OIDC federated
+    # credential, and a `prd-what-if` environment with a required reviewer.
+    # Skips itself if AZURE_CLIENT_ID is unset.
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      github.repository == github.event.repository.full_name
+    runs-on: ubuntu-latest
+    # Deployment itself is never automated: it is run by a human from
+    # infra/README.md step 3.
+    environment: prd-what-if
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check Azure is configured
+        id: cfg
+        run: |
+          if [ -z "${{ vars.AZURE_CLIENT_ID }}" ]; then
+            echo "Azure repository variables not set - skipping what-if."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: azure/login@v2
+        if: steps.cfg.outputs.configured == 'true'
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: What-if
+        if: steps.cfg.outputs.configured == 'true'
+        env:
+          # Parameter files hold tenant-specific values and are gitignored, so
+          # CI supplies them inline instead. ISC_BASE_URL is not a secret, but
+          # a repository variable keeps the hostname out of the source.
+          ISC_BASE_URL: ${{ vars.ISC_BASE_URL }}
+        run: |
+          az deployment group what-if \
+            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
+            --template-file infra/main.bicep \
+            --parameters environment=prd iscBaseUrl="$ISC_BASE_URL" \
+            --result-format FullResourcePayloads
