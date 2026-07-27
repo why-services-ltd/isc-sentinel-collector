@@ -25,6 +25,16 @@ local.settings.json
 infra/*.bicepparam
 !infra/main.bicepparam
 
+# Internal documents. These describe the deployed estate, its identifiers and
+# its credential-handling design once their placeholders are filled in, so they
+# are kept out of the repository by default rather than by remembering to.
+*.docx
+*.doc
+*.pdf
+*.xlsx
+*.pptx
+~$*
+
 # Local editor / assistant configuration
 .claude/
 .vscode/
