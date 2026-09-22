@@ -861,6 +861,16 @@ keeps reporting success while quietly doing the wrong thing.
   direct KQL query against the underlying workspace needs the App-prefixed ones
   (`AppTraces`, `AppExceptions`, `AppRequests`). This one fails loudly —
   changing the alert to `AppExceptions` is rejected at template validation.
+- **`functionFailureAlert` excludes `ConnectionAbortedException` on
+  purpose.** The Functions host on Flex Consumption logs
+  `Microsoft.AspNetCore.Connections.ConnectionAbortedException: "The request
+  stream was aborted."` when the host/worker channel drops. It's host noise,
+  not pipeline code — no `LOGGER` call in either function app produces it,
+  and it doesn't correlate with failed invocations in `AppRequests`. Left
+  unfiltered, it made the alert fire and self-resolve repeatedly with no
+  real failure behind it. Genuine failures still surface as the
+  `RpcException` wrapper (`Exception while executing function: ...`), which
+  the filter does not touch — don't remove it as a "fix".
 - **The rotator mints PATs, not OAuth API Clients.** `POST /v2025/oauth-clients`
   returns 403 for *any* non-interactive caller, whatever its scope, because
   `client_credentials`-grant tokens carry no associated user and that endpoint

@@ -925,7 +925,18 @@ resource functionFailureAlert 'Microsoft.Insights/scheduledQueryRules@2023-03-15
           // ("Failed to resolve table or column expression named
           // 'AppExceptions'"), since that name doesn't resolve through this
           // scope type.
-          query: 'exceptions | summarize Failures = count()'
+          //
+          // The type != filter excludes Microsoft.AspNetCore.Connections
+          // .ConnectionAbortedException ("The request stream was aborted."),
+          // which is Functions host / worker-channel noise on Flex
+          // Consumption, not pipeline code -- confirmed no LOGGER call
+          // anywhere in the repo produces it, and it doesn't correlate with
+          // failed invocations in AppRequests. Genuine failures still surface
+          // as the RpcException wrapper ("Exception while executing
+          // function: ..."), which this does not filter out. Do not remove
+          // this filter; it exists because the alert was firing 10+ times a
+          // week with essentially no real failures behind it.
+          query: 'exceptions | where type != "Microsoft.AspNetCore.Connections.ConnectionAbortedException" | summarize Failures = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Failures'
           operator: 'GreaterThan'
