@@ -753,6 +753,43 @@ reasonable trade if you would rather run one workspace than two — it just move
 pipeline telemetry under the event workspace's billing, retention and access
 model.
 
+### Permission summary
+
+Every permission grant in the pipeline, in one place. The rationale for each
+is in the design notes above; this is the quick-reference version. Nothing
+here is broader than the role/scope it's paired with — see "Why two function
+apps" above for why the collector and rotator are split at all.
+
+**Azure RBAC** (`Microsoft.Authorization/roleAssignments` in `main.bicep`,
+scoped to the resource group's own resources — no assignment here reaches
+outside `rg-iscsiem-prd`):
+
+| Identity | Scope | Role | Why |
+|---|---|---|---|
+| Collector | Key Vault | Key Vault Secrets User | Reads its own credential only; cannot write or manage secrets |
+| Rotator | Key Vault | Key Vault Secrets Officer | Mints and persists replacement credentials for both apps. Not granted to the collector — see "Why two function apps" |
+| Collector | Storage account | Storage Blob Data Owner | `allowSharedKeyAccess` is `false`, so the Flex Consumption deployment package and any blob access must go through RBAC instead of an account key |
+| Collector | Storage account | Storage Queue Data Contributor | Flex Consumption's internal scale controller uses storage queues |
+| Rotator | Storage account | Storage Blob Data Owner | Same reason as the collector |
+| Rotator | Storage account | Storage Queue Data Contributor | Same reason as the collector |
+| Collector | Data collection rule (`dcr-iscsiem-prd`) | Monitoring Metrics Publisher | The only identity that ingests events. The rotator has no role on the DCR at all |
+| Collector | Application Insights (`appi-iscsiem-prd`) | Monitoring Metrics Publisher | App Insights local auth is disabled, so telemetry publishing needs a managed-identity role instead of the instrumentation key |
+| Rotator | Application Insights (`appi-iscsiem-prd`) | Monitoring Metrics Publisher | Same reason as the collector |
+
+**ISC scopes** (the two PATs created in [4a](#4a-create-the-isc-side-identity-and-two-pats),
+minted thereafter by the rotator):
+
+| Credential | Scope | Why |
+|---|---|---|
+| Collector's PAT | `sp:search:read` | Only queries the ISC search API for audit events. Cannot manage tokens, so a compromised collector can't mint itself a broader credential |
+| Rotator's PAT | `sp:my-personal-access-tokens:manage` | Only mints and deletes PATs for both roles. Never calls the search API itself — see `docs/threat-model.md` |
+
+Both PATs inherit the access of the dedicated ISC service identity that
+creates and owns them, not just the scope requested — that identity's own
+capability level is what actually bounds these, and is a decision you make
+in [4a](#4a-create-the-isc-side-identity-and-two-pats), not something this
+template controls.
+
 ---
 
 ## Timing and schedules
