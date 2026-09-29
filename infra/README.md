@@ -766,7 +766,7 @@ outside `rg-iscsiem-prd`):
 
 | Identity | Scope | Role | Why |
 |---|---|---|---|
-| Collector | Key Vault | Key Vault Secrets User | Reads its own credential only; cannot write or manage secrets |
+| Collector | Key Vault | Key Vault Secrets User | Reads its own credential only; cannot write or manage secrets. Scoped to the whole vault by default — see "Optional: scope the collector to its own secret" below to narrow it further |
 | Rotator | Key Vault | Key Vault Secrets Officer | Mints and persists replacement credentials for both apps. Not granted to the collector — see "Why two function apps" |
 | Collector | Storage account | Storage Blob Data Owner | `allowSharedKeyAccess` is `false`, so the Flex Consumption deployment package and any blob access must go through RBAC instead of an account key |
 | Collector | Storage account | Storage Queue Data Contributor | Flex Consumption's internal scale controller uses storage queues |
@@ -789,6 +789,75 @@ creates and owns them, not just the scope requested — that identity's own
 capability level is what actually bounds these, and is a decision you make
 in [4a](#4a-create-the-isc-side-identity-and-two-pats), not something this
 template controls.
+
+### Optional: scope the collector to its own secret
+
+The collector's Key Vault Secrets User grant above is scoped to the whole
+vault, not just its own secret — so it can currently read the *rotator's*
+credential too, even though it never needs to. Since the rotator's PAT can
+mint new PATs for either role, that's a real escalation path: a compromised
+collector shouldn't have a read route to it. Azure Key Vault RBAC supports
+scoping a role assignment to an individual secret instead of the whole vault,
+and `Key Vault Secrets User` is one of the roles that supports it.
+
+**This can't be part of the initial `main.bicep` deploy.** Scoping a role
+assignment to a secret requires the secret to already exist, and this
+template deliberately never creates the secret itself (see "Key Vault" above)
+— it's seeded by hand in [4b](#4b-seed-both-into-key-vault). So this is a
+manual follow-up done once after 4b, not a template parameter.
+
+```bash
+RG=rg-iscsiem-prd
+VAULT=$(az keyvault list -g "$RG" --query "[0].name" -o tsv)
+COLLECTOR=$(az functionapp list -g "$RG" \
+  --query "[?ends_with(name, 'collector')].name | [0]" -o tsv)
+
+COLLECTOR_PRINCIPAL_ID=$(az functionapp identity show \
+  --name "$COLLECTOR" --resource-group "$RG" --query principalId -o tsv)
+
+az role assignment create \
+  --role "Key Vault Secrets User" \
+  --assignee-object-id "$COLLECTOR_PRINCIPAL_ID" \
+  --assignee-principal-type ServicePrincipal \
+  --scope "$(az keyvault show --name "$VAULT" --query id -o tsv)/secrets/isc-api-credential-collector"
+```
+
+Then remove the vault-wide grant the template created — the collector only
+ever calls `get_secret` on its own name, so nothing else it does should
+change:
+
+```bash
+az role assignment delete \
+  --role "Key Vault Secrets User" \
+  --assignee "$COLLECTOR_PRINCIPAL_ID" \
+  --scope "$(az keyvault show --name "$VAULT" --query id -o tsv)"
+```
+
+Verify on its next scheduled run:
+
+```bash
+az functionapp log tail --name "$COLLECTOR" --resource-group "$RG"
+```
+
+Expect `Ingested N events`, same as step 7.
+
+**This survives rotation without repeating any of the above.** The rotator
+calls `set_secret` on the same fixed name every time (`rotator/function_app.py`),
+which creates a new *version* under the same secret object — the role
+assignment above is scoped to the object, not a version, so it stays valid
+indefinitely across rotations.
+
+**This does not survive a template redeploy.** `main.bicep` still declares
+`collectorKeyVaultRead` scoped to the whole vault, so the next
+`az deployment group create` against it will silently recreate the vault-wide
+grant, undoing this. Making it durable means changing the template itself,
+not just running this once — not yet done here. Until then, treat this as a
+step to redo after any full redeploy, not a one-time setting.
+
+**Rollback:** delete the secret-scoped assignment and either rerun the first
+`az role assignment create` block from [4b](#4b-seed-both-into-key-vault)'s
+pattern against the vault scope, or just redeploy `main.bicep`, which
+recreates the vault-wide grant since it's still declared there.
 
 ---
 
